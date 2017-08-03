@@ -2,10 +2,10 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const fileUpload = require('express-fileupload');
 const fs = require('fs-extra');
-const tempy = require('tempy');
 const CDP = require('chrome-remote-interface');
+const Promise = require('bluebird');
 
-const cdpHost = process.env.CHROME_HEADLESS_PORT_9222_TCP_ADDR || 'chrome-headless';
+const cdpHost = process.env.CHROME_HEADLESS_PORT_9222_TCP_ADDR || 'localhost';
 const cdpPort = process.env.CHROME_HEADLESS_PORT_9222_TCP_PORT || '9222';
 
 function print({
@@ -17,72 +17,53 @@ function print({
   userAgent = null,
   full = false
 }) {
-  return new Promise((resolve, reject) => {
 
-    // Start the Chrome Debugging Protocol
-    CDP.New({host: cdpHost, port: cdpPort})
-      .then(target => CDP({target, host: cdpHost, port: cdpPort}))
-      .then(client => {
+  // Set up viewport resolution, etc.
+  const deviceMetrics = {
+    width,
+    height,
+    deviceScaleFactor: 0,
+    mobile: false,
+    fitWindow: false,
+  };
 
-
-      // Extract used DevTools domains.
-      const {DOM, Emulation, Network, Page, Runtime} = client;
-
-      // Set up viewport resolution, etc.
-      const deviceMetrics = {
-        width,
-        height,
-        deviceScaleFactor: 0,
-        mobile: false,
-        fitWindow: false,
-      };
+  let client;
+  return CDP.New({host: cdpHost, port: cdpPort})
+    .then(target => CDP({target, host: cdpHost, port: cdpPort}))
+    .then(c => {
+      client = c;
 
       // Enable events on domains we are interested in.
-      Promise.all([
-        Page.enable(),
-        DOM.enable(),
-        Network.enable(),
-      ]).then(() => {
-        Emulation.setDeviceMetricsOverride(deviceMetrics).then(() => {
-          Emulation.setVisibleSize({width, height}).then(() => {
-            // Navigate to target page
-            Page.navigate({url}).then(() => {
-            });
-          });
-        }).catch((e) => reject(e));
-      }).catch((e) => reject(e));
+      return Promise.all([
+        client.Page.enable(),
+        client.DOM.enable(),
+        client.Network.enable(),
+      ]);
+    })
+    .then(() => client.Emulation.setDeviceMetricsOverride(deviceMetrics))
+    .then(() => client.Emulation.setVisibleSize({width, height}))
+    .then(() => client.Page.navigate({url}))
+    .then(() => client.Page.loadEventFired())
+    .then(() => Promise.delay(delay))
+    .then(() => client.Page.printToPDF({
+      paperWidth: width,
+      paperHeight: height,
 
-
-      // Wait for page load event to take screenshot
-      Page.loadEventFired(() => {
-        setTimeout(() => {
-          Page.printToPDF({
-            paperWidth: width,
-            paperHeight: height,
-
-            scale: 1,
-            // landscape: false,
-            displayHeaderFooter: false,
-            printBackground: true,
-            marginTop: 0,
-            marginBottom: 0,
-            marginLeft: 0,
-            marginRight: 0,
-            pageRanges: '1-1',
-          }).then((screenshot) => {
-            const buffer = new Buffer(screenshot.data, 'base64');
-            client.close();
-            CDP.Close({id: client.target.id, host: cdpHost, port: cdpPort})
-              .then(() => resolve(buffer))
-              .catch(e => reject(e));
-          }).catch((e) => reject(e));
-        }, delay);
-      });
-    }).catch(err => {
-      reject(err);
+      scale: 1,
+      // landscape: false,
+      displayHeaderFooter: false,
+      printBackground: true,
+      marginTop: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      marginRight: 0,
+      pageRanges: '1-1',
+    }))
+    .then((screenshot) => {
+      const buffer = new Buffer(screenshot.data, 'base64');
+      client.close();
+      return buffer;
     });
-
-  });
 }
 
 const app = express();
@@ -98,45 +79,24 @@ curl -F "htmlFile=@test.html" -F "width=8.5" -F "height=11" -X POST -H "Content-
 });
 
 app.post('/', (req, res) => {
-  const file = req.files.htmlFile;
   const width = req.body.width ? parseInt(req.body.width, 10) : undefined;
   const height = req.body.height ? parseInt(req.body.height, 10) : undefined;
   const delay = req.body.delay ? parseInt(req.body.delay, 10) : undefined;
+  const filename = req.body.filename;
 
-  if (!file) {
-    return res.status(422).send('No htmlFile sent.');
-  }
-
-  const tmp = tempy.file({extension: 'html'});
-
-  file.mv(tmp, (err) => {
-    if (err) {
-      res.status(500).send('There was an error.');
-      throw err;
-    }
-
-    const newPath = `/printfiles/${tmp.replace(/^.*\/(.*)$/, '$1')}`;
-    fs.move(tmp, newPath, {overwrite: true}, err => {
-      if (err) {
-        console.log(err);
-        res.status(500).send('There was an error.');
-      }
-
-      print({
-        width,
-        height,
-        delay,
-        url: 'file://' + newPath
-      }).then((data) => {
-        res.status(200).type('application/pdf').send(data);
-        fs.remove(newPath);
-      }).catch((e) => {
-        console.log(e);
-        res.status(500).send('some kind of failure');
-      });
-    });
-
-  })
+  console.log(filename);
+  print({
+    width,
+    height,
+    delay,
+    url: `file:///printfiles/${filename}`
+  }).then((data) => {
+    res.status(200).type('application/pdf').send(data);
+    fs.remove(`/printfiles/${filename}`);
+  }).catch((e) => {
+    console.log(e);
+    res.status(500).send('some kind of failure');
+  });
 });
 
 app.listen(process.env.NODE_PORT || 8888);
