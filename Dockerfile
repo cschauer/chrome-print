@@ -7,10 +7,13 @@ RUN apt-get update -y && apt-get install -y -q libnss3 libfontconfig && rm -rf /
 
 COPY --from=0 /chrome /chrome
 
+WORKDIR /server
+ADD package.json /server/package.json
+RUN npm i
+
 ADD . /server
 WORKDIR /server
 
-RUN npm i
 
 EXPOSE 8888
 
